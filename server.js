@@ -64,14 +64,6 @@ app.post("/voice", async (req, res) => {
   // Say or Play a message (optional)
   twiml.play("https://ridgelineradio.org/PhoneAnswer.mp3");
 
-  //
-  // const dial = twiml.dial();
-  // dial.conference({
-  //   waitUrl: '/twiml', // This plays your Icecast stream to the caller
-  //   startConferenceOnEnter: true,
-  //   endConferenceOnExit: true,
-  //   record: 'do-not-record',
-  // }, 'ridgeline-room');
   const connect = twiml.connect();
   connect.stream({
     url: `wss://${req.headers.host}/media`,
