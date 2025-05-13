@@ -15,6 +15,14 @@ our simple use case.
 Designed for deployment with Dokku. Build the Dockerfile and deploy to your
 favorite container service!
 
+## Environment Variables
+
+* `ALERT_SMS_TO` - dual purpose texts and calls this number whenever a phone call arrives
+* `STREAM_URL` - the URL for your Icecast stream (only tested with AAC+ Icecast)
+* `TWILIO_ACCOUNT_SID` - Twilio account SID
+* `TWILIO_AUTH_TOKEN` - Twilio auth token
+* `TWILIO_NUMBER` - your Twilio phone number that is receiving calls
+
 ## License
 
 MIT
