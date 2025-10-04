@@ -105,7 +105,7 @@ app.post("/voice", async (req, res) => {
     // Set up 3-minute timeout for voicemail
     const timeoutId = setTimeout(
       () => redirectToVoicemail(callSid, from),
-      3 * 60 * 1000,
+      1 * 30 * 1000,
     );
 
     // Store call state
