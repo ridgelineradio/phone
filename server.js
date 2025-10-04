@@ -258,6 +258,8 @@ app.post("/join", async (req, res) => {
 // Voicemail endpoint
 app.post("/voicemail", (req, res) => {
   const callSid = req.query.callSid;
+  const from = req.body.From;
+  const host = req.headers.host;
   const twiml = new VoiceResponse();
 
   twiml.say(
@@ -266,8 +268,8 @@ app.post("/voicemail", (req, res) => {
   twiml.record({
     maxLength: 120,
     transcribe: true,
-    transcribeCallback: `https://${process.env.HOST}/voicemail-complete?callSid=${callSid}`,
-    recordingStatusCallback: `https://${process.env.HOST}/voicemail-recording?callSid=${callSid}`,
+    transcribeCallback: `https://${host}/voicemail-complete?callSid=${callSid}&from=${encodeURIComponent(from)}`,
+    recordingStatusCallback: `https://${host}/voicemail-recording?callSid=${callSid}&from=${encodeURIComponent(from)}`,
   });
   twiml.say("Thank you for your message. Goodbye.");
 
@@ -275,16 +277,20 @@ app.post("/voicemail", (req, res) => {
   res.send(twiml.toString());
 });
 
+// Store voicemail message timestamps for threading transcriptions
+const voicemailMessages = new Map();
+
 // Voicemail recording ready webhook
 app.post("/voicemail-recording", async (req, res) => {
   res.status(200).send();
 
-  const recordingUrl = req.body.RecordingUrl;
+  const recordingSid = req.body.RecordingSid;
   const callSid = req.query.callSid;
-  const from = req.body.From || "Unknown";
+  const from = req.query.from || req.body.From || "Unknown";
+  const host = req.headers.host;
 
   try {
-    await slack.chat.postMessage({
+    const result = await slack.chat.postMessage({
       channel: SLACK_CHANNEL_ID,
       text: `Voicemail from ${from}`,
       blocks: [
@@ -292,15 +298,50 @@ app.post("/voicemail-recording", async (req, res) => {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*Voicemail Received*\n:voicemail: From: ${from}\n<${recordingUrl}.mp3|Listen to recording>`,
+            text: `*Voicemail Received*\n:incoming_envelope: From: ${from}\n<https://${host}/recording/${recordingSid}|Listen to recording>`,
           },
         },
       ],
     });
 
+    // Store the message timestamp so we can thread the transcription
+    voicemailMessages.set(callSid, result.ts);
+
     console.log(`Posted voicemail from ${from} to Slack`);
   } catch (err) {
     console.error("Failed to post voicemail to Slack:", err.message);
+  }
+});
+
+// Proxy endpoint to serve recordings with authentication
+app.get("/recording/:recordingSid", async (req, res) => {
+  const recordingSid = req.params.recordingSid;
+
+  try {
+    // Fetch the recording from Twilio with authentication
+    const recording = await client.recordings(recordingSid).fetch();
+
+    // Redirect to the media URL with auth credentials embedded
+    const mediaUrl = `https://api.twilio.com${recording.mediaUrl}`;
+    const authUrl = mediaUrl.replace(
+      "https://",
+      `https://${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}@`
+    );
+
+    // Fetch the actual recording file
+    const fetch = require("https").get;
+    const https = require("https");
+
+    https.get(authUrl, (twilioRes) => {
+      res.setHeader("Content-Type", "audio/mpeg");
+      twilioRes.pipe(res);
+    }).on("error", (err) => {
+      console.error("Error fetching recording:", err);
+      res.status(500).send("Error fetching recording");
+    });
+  } catch (err) {
+    console.error("Failed to fetch recording:", err.message);
+    res.status(500).send("Error fetching recording");
   }
 });
 
@@ -312,10 +353,13 @@ app.post("/voicemail-complete", async (req, res) => {
   const callSid = req.query.callSid;
 
   if (transcription) {
+    const parentTs = voicemailMessages.get(callSid);
+
     try {
       await slack.chat.postMessage({
         channel: SLACK_CHANNEL_ID,
-        text: `Voicemail transcription`,
+        thread_ts: parentTs, // Thread under the voicemail message
+        text: `Transcription: ${transcription}`,
         blocks: [
           {
             type: "section",
@@ -326,6 +370,9 @@ app.post("/voicemail-complete", async (req, res) => {
           },
         ],
       });
+
+      // Clean up the stored message timestamp
+      voicemailMessages.delete(callSid);
     } catch (err) {
       console.error("Failed to post transcription to Slack:", err.message);
     }
