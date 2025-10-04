@@ -49,7 +49,7 @@ const slack = new WebClient(SLACK_BOT_TOKEN);
 // Track pending calls: callSid -> { from, timeoutId, slackTs, conferenceRoom }
 const pendingCalls = new Map();
 
-let currentCallSid = null; // TODO: this is potentially very awkward.
+app.get("/healthz", (_, res) => res.sendStatus(200));
 
 app.get("/", (_, res) => res.send("Twilio Icecast Stream Server"));
 
@@ -232,27 +232,6 @@ app.post("/join-conference", async (req, res) => {
       console.error("Failed to redirect caller to conference:", err.message);
     }
   }
-});
-
-app.post("/join", async (req, res) => {
-  const twiml = new VoiceResponse();
-  const dial = twiml.dial();
-  dial.conference(
-    {
-      endConferenceOnExit: true,
-      record: "record-from-start",
-      beep: false,
-    },
-    "the-room",
-  );
-
-  res.type("text/xml");
-  res.send(twiml.toString());
-
-  // Redirect the existing call
-  await client.calls(currentCallSid).update({
-    twiml,
-  });
 });
 
 // Voicemail endpoint
