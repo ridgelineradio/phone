@@ -322,14 +322,12 @@ app.get("/recording/:recordingSid", async (req, res) => {
     const recording = await client.recordings(recordingSid).fetch();
 
     // Redirect to the media URL with auth credentials embedded
-    const mediaUrl = `https://api.twilio.com${recording.mediaUrl}`;
-    const authUrl = mediaUrl.replace(
+    const authUrl = recording.mediaUrl.replace(
       "https://",
       `https://${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}@`
     );
 
     // Fetch the actual recording file
-    const fetch = require("https").get;
     const https = require("https");
 
     https.get(authUrl, (twilioRes) => {
