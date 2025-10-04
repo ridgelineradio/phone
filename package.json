@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@slack/web-api": "^7.10.0",
     "express": "^5.1.0",
     "fluent-ffmpeg": "^2.1.3",
     "twilio": "^5.6.0",
