@@ -114,6 +114,7 @@ app.post("/voice", async (req, res) => {
       timeoutId,
       slackTs: result.ts,
       conferenceRoom,
+      host: req.headers.host,
     });
 
     console.log(`Posted to Slack for call from ${from}`);
@@ -175,40 +176,62 @@ app.post("/slack/interactive", async (req, res) => {
         return;
       }
 
-      // Place call to the responder
+      const host = process.env.HOST || callState.host;
+
+      // Place call to the responder - pass the caller's SID so we can redirect them when volunteer answers
       const responderCall = await client.calls.create({
         to: userPhone,
         from: process.env.TWILIO_NUMBER,
-        url: `https://${process.env.HOST}/join-conference?room=${callState.conferenceRoom}`,
+        url: `https://${host}/join-conference?room=${callState.conferenceRoom}&callSid=${callSid}`,
       });
 
-      // Redirect original caller to conference
-      await client.calls(callSid).update({
-        url: `https://${process.env.HOST}/join-conference?room=${callState.conferenceRoom}`,
-      });
-
-      console.log(`Connected ${callState.from} with ${userName}`);
+      console.log(`Calling ${userName} to connect with ${callState.from}`);
     } catch (err) {
       console.error(`Failed to connect calls: ${err.message}`);
     }
   }
 });
 
-// Conference join endpoint
-app.post("/join-conference", (req, res) => {
+// Conference join endpoint for the volunteer (triggers caller redirect)
+app.post("/join-conference", async (req, res) => {
   const room = req.query.room;
+  const callSid = req.query.callSid;
+
   const twiml = new VoiceResponse();
   const dial = twiml.dial();
   dial.conference(
     {
       endConferenceOnExit: true,
       beep: false,
+      startConferenceOnEnter: true,
+      waitUrl: "",
     },
     room,
   );
 
   res.type("text/xml");
   res.send(twiml.toString());
+
+  // Now that volunteer answered, redirect the original caller to the conference
+  if (callSid) {
+    try {
+      const joinTwiml = new VoiceResponse();
+      const joinDial = joinTwiml.dial();
+      joinDial.conference(
+        {
+          endConferenceOnExit: true,
+          beep: false,
+        },
+        room,
+      );
+
+      await client.calls(callSid).update({
+        twiml: joinTwiml.toString(),
+      });
+    } catch (err) {
+      console.error("Failed to redirect caller to conference:", err.message);
+    }
+  }
 });
 
 app.post("/join", async (req, res) => {
