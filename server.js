@@ -45,6 +45,7 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN,
 );
 const slack = new WebClient(SLACK_BOT_TOKEN);
+const HOLD_SECONDS = 3 * 60;
 
 // Track pending calls: callSid -> { from, timeoutId, slackTs, conferenceRoom }
 const pendingCalls = new Map();
@@ -105,7 +106,7 @@ app.post("/voice", async (req, res) => {
     // Set up 3-minute timeout for voicemail
     const timeoutId = setTimeout(
       () => redirectToVoicemail(callSid, from),
-      1 * 30 * 1000,
+      HOLD_SECONDS * 1000,
     );
 
     // Store call state
