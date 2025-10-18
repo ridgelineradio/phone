@@ -45,7 +45,7 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN,
 );
 const slack = new WebClient(SLACK_BOT_TOKEN);
-const HOLD_SECONDS = 3 * 60;
+const HOLD_SECONDS = 1 * 60;
 
 // Track pending calls: callSid -> { from, timeoutId, slackTs, conferenceRoom }
 const pendingCalls = new Map();
