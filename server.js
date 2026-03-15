@@ -202,6 +202,7 @@ app.post("/join-conference", async (req, res) => {
   const dial = twiml.dial();
   dial.conference(
     {
+      record: "record-from-start",
       endConferenceOnExit: true,
       beep: false,
       startConferenceOnEnter: true,
@@ -220,6 +221,7 @@ app.post("/join-conference", async (req, res) => {
       const joinDial = joinTwiml.dial();
       joinDial.conference(
         {
+          record: "record-from-start",
           endConferenceOnExit: true,
           beep: false,
         },
