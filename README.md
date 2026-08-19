@@ -18,6 +18,7 @@ our simple use case.
 * **Interactive Call Handling**: Team members click the button to answer the call, and the system connects them to the caller
 * **Voicemail System**: If no one responds within 3 minutes, the call is automatically redirected to voicemail
 * **Voicemail Delivery**: Recorded voicemails are posted to Slack with a link to the recording and transcription
+* **Spam Filtering**: Mark a caller as spam from the Slack message; future calls from that number skip the Slack notification and go straight to voicemail, only appearing once the caller leaves a successfully transcribed message
 
 ## Deployment
 
@@ -50,6 +51,7 @@ Configure your Twilio phone number's voice webhook to point to `https://your-hos
 * `SLACK_SIGNING_SECRET` - Slack app signing secret for verifying requests
 * `SLACK_CHANNEL_ID` - Slack channel ID where call notifications will be posted
 * `HOST` - your application's public hostname (e.g., phone.example.com)
+* `SPAM_STORE_PATH` - (optional) path to the JSON file where spam numbers are persisted (default `./spam-numbers.json`)
 
 ## License
 

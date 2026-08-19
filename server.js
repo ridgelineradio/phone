@@ -27,6 +27,7 @@ const { MessagingResponse, VoiceResponse } = require("twilio").twiml;
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { WebClient } = require("@slack/web-api");
+const fs = require("fs");
 
 const ICECAST_URL = process.env.STREAM_URL;
 const ALERT_SMS_TO = process.env.ALERT_SMS_TO;
@@ -50,6 +51,56 @@ const HOLD_SECONDS = 1 * 60;
 // Track pending calls: callSid -> { from, timeoutId, slackTs, conferenceRoom }
 const pendingCalls = new Map();
 
+// Track numbers marked as spam. Calls from these numbers are NOT announced in
+// Slack; they go straight to voicemail and only surface once the caller leaves
+// a message that is successfully transcribed. Persisted best-effort to disk so
+// the list survives process restarts.
+const SPAM_STORE_PATH = process.env.SPAM_STORE_PATH || "./spam-numbers.json";
+const spamNumbers = new Set();
+
+function loadSpamNumbers() {
+  try {
+    const raw = fs.readFileSync(SPAM_STORE_PATH, "utf8");
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) arr.forEach((n) => spamNumbers.add(n));
+    console.log(`Loaded ${spamNumbers.size} spam number(s) from ${SPAM_STORE_PATH}`);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error("Failed to load spam numbers:", err.message);
+    }
+  }
+}
+
+function saveSpamNumbers() {
+  try {
+    fs.writeFileSync(SPAM_STORE_PATH, JSON.stringify([...spamNumbers], null, 2));
+  } catch (err) {
+    console.error("Failed to save spam numbers:", err.message);
+  }
+}
+
+function isSpam(from) {
+  return Boolean(from) && spamNumbers.has(from);
+}
+
+loadSpamNumbers();
+
+// Build the voicemail TwiML (say + record with transcription callbacks).
+function buildVoicemailTwiml({ callSid, from, host }) {
+  const twiml = new VoiceResponse();
+  twiml.say(
+    "No one is available to take your call. Please leave a message after the beep.",
+  );
+  twiml.record({
+    maxLength: 120,
+    transcribe: true,
+    transcribeCallback: `https://${host}/voicemail-complete?callSid=${callSid}&from=${encodeURIComponent(from)}`,
+    recordingStatusCallback: `https://${host}/voicemail-recording?callSid=${callSid}&from=${encodeURIComponent(from)}`,
+  });
+  twiml.say("Thank you for your message. Goodbye.");
+  return twiml;
+}
+
 app.get("/healthz", (_, res) => res.sendStatus(200));
 
 app.get("/", (_, res) => res.send("Twilio Icecast Stream Server"));
@@ -58,6 +109,22 @@ app.post("/voice", async (req, res) => {
   const from = req.body.From;
   const callSid = req.body.CallSid;
   const conferenceRoom = `conf-${callSid}`;
+
+  // Known spam numbers are never announced in Slack. Send them straight to
+  // voicemail; nothing posts until they leave a successfully transcribed message.
+  if (isSpam(from)) {
+    console.log(
+      `Spam number ${from} - routing to voicemail, suppressing Slack notification`,
+    );
+    const vmTwiml = buildVoicemailTwiml({
+      callSid,
+      from,
+      host: req.headers.host,
+    });
+    res.type("text/xml");
+    res.send(vmTwiml.toString());
+    return;
+  }
 
   // Respond with TwiML - play hold music
   const twiml = new VoiceResponse();
@@ -96,6 +163,16 @@ app.post("/voice", async (req, res) => {
               },
               style: "primary",
               action_id: "take_call",
+              value: callSid,
+            },
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: "Mark as spam",
+              },
+              style: "danger",
+              action_id: "mark_spam",
               value: callSid,
             },
           ],
@@ -191,6 +268,59 @@ app.post("/slack/interactive", async (req, res) => {
       console.error(`Failed to connect calls: ${err.message}`);
     }
   }
+
+  if (action.action_id === "mark_spam") {
+    const callSid = action.value;
+    const userId = payload.user.id;
+    const userName = payload.user.name;
+
+    const callState = pendingCalls.get(callSid);
+    const from = callState ? callState.from : null;
+
+    if (!from) {
+      console.log(`Cannot mark spam: call ${callSid} no longer pending`);
+      return;
+    }
+
+    // Remember the number so future calls are silenced until transcribed.
+    spamNumbers.add(from);
+    saveSpamNumbers();
+    console.log(`Marked ${from} as spam (by ${userName})`);
+
+    // This call no longer needs the "take it" timeout.
+    clearTimeout(callState.timeoutId);
+    pendingCalls.delete(callSid);
+
+    // Update the Slack message to reflect the decision.
+    try {
+      await slack.chat.update({
+        channel: SLACK_CHANNEL_ID,
+        ts: callState.slackTs,
+        text: `Call from ${from} marked as spam`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `*Call from ${from}*\n:no_entry: Marked as spam by <@${userId}>. Future calls from this number won't post here until the caller leaves a transcribed message.`,
+            },
+          },
+        ],
+      });
+    } catch (err) {
+      console.error("Failed to update Slack message:", err.message);
+    }
+
+    // Send the current spam caller to voicemail now.
+    try {
+      const host = process.env.HOST || callState.host;
+      await client.calls(callSid).update({
+        url: `https://${host}/voicemail?callSid=${callSid}`,
+      });
+    } catch (err) {
+      console.error("Failed to redirect spam caller to voicemail:", err.message);
+    }
+  }
 });
 
 // Conference join endpoint for the volunteer (triggers caller redirect)
@@ -242,18 +372,7 @@ app.post("/voicemail", (req, res) => {
   const callSid = req.query.callSid;
   const from = req.body.From;
   const host = req.headers.host;
-  const twiml = new VoiceResponse();
-
-  twiml.say(
-    "No one is available to take your call. Please leave a message after the beep.",
-  );
-  twiml.record({
-    maxLength: 120,
-    transcribe: true,
-    transcribeCallback: `https://${host}/voicemail-complete?callSid=${callSid}&from=${encodeURIComponent(from)}`,
-    recordingStatusCallback: `https://${host}/voicemail-recording?callSid=${callSid}&from=${encodeURIComponent(from)}`,
-  });
-  twiml.say("Thank you for your message. Goodbye.");
+  const twiml = buildVoicemailTwiml({ callSid, from, host });
 
   res.type("text/xml");
   res.send(twiml.toString());
@@ -270,6 +389,14 @@ app.post("/voicemail-recording", async (req, res) => {
   const callSid = req.query.callSid;
   const from = req.query.from || req.body.From || "Unknown";
   const host = req.headers.host;
+
+  // Spam numbers stay silent until a transcription is available.
+  if (isSpam(from)) {
+    console.log(
+      `Suppressing voicemail-recording Slack post for spam number ${from}`,
+    );
+    return;
+  }
 
   try {
     const result = await slack.chat.postMessage({
@@ -331,31 +458,61 @@ app.post("/voicemail-complete", async (req, res) => {
 
   const transcription = req.body.TranscriptionText;
   const callSid = req.query.callSid;
+  const from = req.query.from || req.body.From || "Unknown";
+  const recordingSid = req.body.RecordingSid;
+  const host = req.headers.host;
 
-  if (transcription) {
-    const parentTs = voicemailMessages.get(callSid);
+  if (!transcription) return;
 
+  // Spam calls were never announced. Now that the caller has left a message and
+  // it transcribed successfully, post a single self-contained message.
+  if (isSpam(from)) {
+    const listen = recordingSid
+      ? `\n<https://${host}/recording/${recordingSid}|Listen to recording>`
+      : "";
     try {
       await slack.chat.postMessage({
         channel: SLACK_CHANNEL_ID,
-        thread_ts: parentTs, // Thread under the voicemail message
-        text: `Transcription: ${transcription}`,
+        text: `Voicemail from ${from} (marked as spam)`,
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `*Transcription:*\n${transcription}`,
+              text: `*Voicemail from ${from}* :no_entry: _(marked as spam)_${listen}\n\n*Transcription:*\n${transcription}`,
             },
           },
         ],
       });
-
-      // Clean up the stored message timestamp
-      voicemailMessages.delete(callSid);
+      console.log(`Posted transcribed spam voicemail from ${from} to Slack`);
     } catch (err) {
-      console.error("Failed to post transcription to Slack:", err.message);
+      console.error("Failed to post spam voicemail to Slack:", err.message);
     }
+    return;
+  }
+
+  const parentTs = voicemailMessages.get(callSid);
+
+  try {
+    await slack.chat.postMessage({
+      channel: SLACK_CHANNEL_ID,
+      thread_ts: parentTs, // Thread under the voicemail message
+      text: `Transcription: ${transcription}`,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Transcription:*\n${transcription}`,
+          },
+        },
+      ],
+    });
+
+    // Clean up the stored message timestamp
+    voicemailMessages.delete(callSid);
+  } catch (err) {
+    console.error("Failed to post transcription to Slack:", err.message);
   }
 });
 
