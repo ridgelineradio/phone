@@ -50,6 +50,15 @@ const HOLD_SECONDS = 1 * 60;
 // Track pending calls: callSid -> { from, timeoutId, slackTs, conferenceRoom }
 const pendingCalls = new Map();
 
+// Inbound-text conversation threading: phone number -> { ts, lastActivity }.
+// If the same number texts again within TEXT_THREAD_WINDOW_MS, the new text is
+// posted into the existing Slack thread instead of a fresh top-level message.
+const TEXT_THREAD_WINDOW_MS =
+  (parseInt(process.env.TEXT_THREAD_WINDOW_MINUTES || "15", 10) || 15) *
+  60 *
+  1000;
+const textThreads = new Map();
+
 app.get("/healthz", (_, res) => res.sendStatus(200));
 
 app.get("/", (_, res) => res.send("Twilio Icecast Stream Server"));
@@ -137,12 +146,27 @@ app.post("/sms", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 
   try {
+    const now = Date.now();
+
+    // Drop stale conversations so the map does not grow unbounded.
+    for (const [num, info] of textThreads) {
+      if (now - info.lastActivity > TEXT_THREAD_WINDOW_MS) {
+        textThreads.delete(num);
+      }
+    }
+
+    // Look back: if this number texted (or we replied) recently, keep the
+    // conversation in the same Slack thread instead of starting a new message.
+    const prior = textThreads.get(from);
+    const continues =
+      prior && now - prior.lastActivity <= TEXT_THREAD_WINDOW_MS;
+
     const lines = [`*Incoming Text*`, `:speech_balloon: From: ${from}`];
     if (body) {
       lines.push(`\n>${body.replace(/\n/g, "\n>")}`);
     }
 
-    const result = await slack.chat.postMessage({
+    const postOptions = {
       channel: SLACK_CHANNEL_ID,
       text: `Incoming text from ${from}: ${body}`,
       blocks: [
@@ -164,7 +188,17 @@ app.post("/sms", async (req, res) => {
           ],
         },
       ],
-    });
+    };
+    if (continues) {
+      postOptions.thread_ts = prior.ts;
+    }
+
+    const result = await slack.chat.postMessage(postOptions);
+
+    // Anchor on the root (top-level) message that started the thread and
+    // refresh the activity window.
+    const rootTs = continues ? prior.ts : result.ts;
+    textThreads.set(from, { ts: rootTs, lastActivity: now });
 
     const mediaUrls = [];
     for (let i = 0; i < numMedia; i++) {
@@ -174,7 +208,7 @@ app.post("/sms", async (req, res) => {
     if (mediaUrls.length) {
       await slack.chat.postMessage({
         channel: SLACK_CHANNEL_ID,
-        thread_ts: result.ts,
+        thread_ts: rootTs,
         text: `Attachments:\n${mediaUrls.join("\n")}`,
       });
     }
@@ -207,6 +241,13 @@ app.post("/slack/interactive", async (req, res) => {
         thread_ts: meta.ts,
         text: `:outbox_tray: Reply sent to ${meta.to} by <@${payload.user.id}>:\n>${replyText.replace(/\n/g, "\n>")}`,
       });
+
+      // An operator reply counts as recent activity, so the texter's next
+      // message stays in this conversation thread.
+      const thread = textThreads.get(meta.to);
+      if (thread) {
+        thread.lastActivity = Date.now();
+      }
     } catch (err) {
       console.error("Error sending SMS reply:", err);
     }
