@@ -18,6 +18,7 @@ our simple use case.
 * **Interactive Call Handling**: Team members click the button to answer the call, and the system connects them to the caller
 * **Voicemail System**: If no one responds within 3 minutes, the call is automatically redirected to voicemail
 * **Voicemail Delivery**: Recorded voicemails are posted to Slack with a link to the recording and transcription
+* **Inbound Texts**: Incoming SMS/MMS are posted to Slack with a "Reply" button that opens a modal for replying to the sender directly from Slack
 
 ## Deployment
 
@@ -37,7 +38,9 @@ favorite container service!
 
 ### Twilio Setup
 
-Configure your Twilio phone number's voice webhook to point to `https://your-host.com/voice`
+Configure your Twilio phone number's voice webhook ("A call comes in") to point to `https://your-host.com/voice`
+
+Configure your Twilio phone number's messaging webhook ("A message comes in") to point to `POST https://your-host.com/sms`. Inbound texts and MMS are posted to your Slack channel with a **Reply** button; clicking it opens a Slack modal where a team member can reply directly to the sender's number. This uses the same Interactivity Request URL (`/slack/interactive`) and the `chat:write` scope already configured above.
 
 ## Environment Variables
 
