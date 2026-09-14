@@ -124,13 +124,130 @@ app.post("/voice", async (req, res) => {
   }
 });
 
+// Twilio inbound SMS/MMS webhook -> post to Slack with a Reply button
+app.post("/sms", async (req, res) => {
+  const from = req.body.From;
+  const body = req.body.Body || "";
+  const numMedia = parseInt(req.body.NumMedia || "0", 10);
+
+  console.log(`Incoming text from ${from}: ${body}`);
+
+  // Ack Twilio immediately with empty TwiML (no auto-reply)
+  const twiml = new MessagingResponse();
+  res.type("text/xml").send(twiml.toString());
+
+  try {
+    const mediaUrls = [];
+    for (let i = 0; i < numMedia; i++) {
+      const url = req.body[`MediaUrl${i}`];
+      if (url) mediaUrls.push(url);
+    }
+
+    const lines = [`*Incoming Text*`, `:speech_balloon: From: ${from}`];
+    if (body) {
+      lines.push(`\n>${body.replace(/\n/g, "\n>")}`);
+    }
+    if (mediaUrls.length) {
+      lines.push(`\nAttachments:\n${mediaUrls.join("\n")}`);
+    }
+
+    await slack.chat.postMessage({
+      channel: SLACK_CHANNEL_ID,
+      text: `Incoming text from ${from}: ${body}`,
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: lines.join("\n") },
+        },
+        {
+          type: "actions",
+          block_id: "text_actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Reply" },
+              style: "primary",
+              action_id: "reply_text",
+              value: from,
+            },
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    console.error("Error posting incoming text to Slack:", err);
+  }
+});
+
 // Slack interactivity endpoint
 app.post("/slack/interactive", async (req, res) => {
   // Acknowledge the request immediately
   res.status(200).send();
 
   const payload = JSON.parse(req.body.payload);
+
+  // Modal submission: send the SMS reply
+  if (payload.type === "view_submission") {
+    try {
+      const meta = JSON.parse(payload.view.private_metadata || "{}");
+      const replyText = payload.view.state.values.reply_block.reply_input.value;
+
+      await client.messages.create({
+        to: meta.to,
+        from: process.env.TWILIO_NUMBER,
+        body: replyText,
+      });
+
+      await slack.chat.postMessage({
+        channel: meta.channel,
+        thread_ts: meta.ts,
+        text: `:outbox_tray: Reply sent to ${meta.to} by <@${payload.user.id}>:\n>${replyText.replace(/\n/g, "\n>")}`,
+      });
+    } catch (err) {
+      console.error("Error sending SMS reply:", err);
+    }
+    return;
+  }
+
   const action = payload.actions[0];
+
+  if (action.action_id === "reply_text") {
+    const to = action.value;
+    const channel = payload.channel.id;
+    const ts = payload.message.ts;
+
+    try {
+      await slack.views.open({
+        trigger_id: payload.trigger_id,
+        view: {
+          type: "modal",
+          callback_id: "reply_text_modal",
+          private_metadata: JSON.stringify({ to, channel, ts }),
+          title: { type: "plain_text", text: "Reply to Text" },
+          submit: { type: "plain_text", text: "Send" },
+          close: { type: "plain_text", text: "Cancel" },
+          blocks: [
+            {
+              type: "input",
+              block_id: "reply_block",
+              label: { type: "plain_text", text: `Reply to ${to}` },
+              element: {
+                type: "plain_text_input",
+                action_id: "reply_input",
+                multiline: true,
+                placeholder: {
+                  type: "plain_text",
+                  text: "Type your reply…",
+                },
+              },
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      console.error("Error opening reply modal:", err);
+    }
+  }
 
   if (action.action_id === "take_call") {
     const callSid = action.value;
