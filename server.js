@@ -137,21 +137,12 @@ app.post("/sms", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 
   try {
-    const mediaUrls = [];
-    for (let i = 0; i < numMedia; i++) {
-      const url = req.body[`MediaUrl${i}`];
-      if (url) mediaUrls.push(url);
-    }
-
     const lines = [`*Incoming Text*`, `:speech_balloon: From: ${from}`];
     if (body) {
       lines.push(`\n>${body.replace(/\n/g, "\n>")}`);
     }
-    if (mediaUrls.length) {
-      lines.push(`\nAttachments:\n${mediaUrls.join("\n")}`);
-    }
 
-    await slack.chat.postMessage({
+    const result = await slack.chat.postMessage({
       channel: SLACK_CHANNEL_ID,
       text: `Incoming text from ${from}: ${body}`,
       blocks: [
@@ -174,6 +165,19 @@ app.post("/sms", async (req, res) => {
         },
       ],
     });
+
+    const mediaUrls = [];
+    for (let i = 0; i < numMedia; i++) {
+      const url = req.body[`MediaUrl${i}`];
+      if (url) mediaUrls.push(url);
+    }
+    if (mediaUrls.length) {
+      await slack.chat.postMessage({
+        channel: SLACK_CHANNEL_ID,
+        thread_ts: result.ts,
+        text: `Attachments:\n${mediaUrls.join("\n")}`,
+      });
+    }
   } catch (err) {
     console.error("Error posting incoming text to Slack:", err);
   }
