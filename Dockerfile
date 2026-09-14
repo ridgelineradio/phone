@@ -1,7 +1,7 @@
 FROM node:20-slim
 
-# Install system dependencies for ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg && \
+# Install system dependencies for ffmpeg and native module builds (better-sqlite3)
+RUN apt-get update && apt-get install -y ffmpeg python3 make g++ && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
