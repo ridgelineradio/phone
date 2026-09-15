@@ -43,6 +43,8 @@ Configure your Twilio phone number's voice webhook ("A call comes in") to point 
 
 Configure your Twilio phone number's messaging webhook ("A message comes in") to point to `POST https://your-host.com/sms`. Inbound texts and MMS are posted to your Slack channel with a **Reply** button; clicking it opens a Slack modal where a team member can reply directly to the sender's number. This uses the same Interactivity Request URL (`/slack/interactive`) and the `chat:write` scope already configured above.
 
+Consecutive texts from the same number within a look-back window (default 15 minutes, configurable via `TEXT_THREAD_WINDOW_MINUTES`) are grouped into the same Slack thread instead of creating a new top-level message. An operator reply refreshes that window so an active back-and-forth stays together.
+
 ## Caller Directory (database)
 
 The app remembers caller names in a small SQLite database (via
@@ -84,6 +86,7 @@ needed when using the mount above.
 * `SLACK_BOT_TOKEN` - Slack bot token with permissions for chat:write, users:read, and channels:read
 * `SLACK_SIGNING_SECRET` - Slack app signing secret for verifying requests
 * `SLACK_CHANNEL_ID` - Slack channel ID where call notifications will be posted
+* `TEXT_THREAD_WINDOW_MINUTES` - optional; look-back window in minutes for grouping consecutive texts from the same number into one Slack thread (default 15)
 * `HOST` - your application's public hostname (e.g., phone.example.com)
 * `DB_PATH` - path to the SQLite caller-directory database (default `./data/directory.db`); point this inside a persistent mount on Dokku
 
