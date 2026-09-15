@@ -22,65 +22,18 @@ const { createServer } = require("http");
 const { WebSocketServer } = require("ws");
 const ffmpeg = require("fluent-ffmpeg");
 const { PassThrough } = require("stream");
-const fs = require("fs");
-const path = require("path");
 
 const { MessagingResponse, VoiceResponse } = require("twilio").twiml;
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { WebClient } = require("@slack/web-api");
-const Database = require("better-sqlite3");
+const { lookupName, saveName, displayCaller } = require("./directory");
 
 const ICECAST_URL = process.env.STREAM_URL;
 const ALERT_SMS_TO = process.env.ALERT_SMS_TO;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
-
-// Caller directory database (SQLite via better-sqlite3)
-const DB_PATH =
-  process.env.DB_PATH || path.join(__dirname, "data", "directory.db");
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS directory (
-    phone_number TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-`);
-
-const lookupNameStmt = db.prepare(
-  "SELECT name FROM directory WHERE phone_number = ?",
-);
-const saveNameStmt = db.prepare(`
-  INSERT INTO directory (phone_number, name)
-  VALUES (@phone_number, @name)
-  ON CONFLICT(phone_number) DO UPDATE SET
-    name = excluded.name,
-    updated_at = datetime('now')
-`);
-
-// Returns the saved name for a phone number, or null if none is known.
-function lookupName(phoneNumber) {
-  if (!phoneNumber) return null;
-  const row = lookupNameStmt.get(phoneNumber);
-  return row ? row.name : null;
-}
-
-// Inserts or updates the name for a phone number.
-function saveName(phoneNumber, name) {
-  saveNameStmt.run({ phone_number: phoneNumber, name });
-}
-
-// Returns "Name (number)" if a name is known, otherwise the raw number.
-function displayCaller(phoneNumber) {
-  if (!phoneNumber) return phoneNumber;
-  const name = lookupName(phoneNumber);
-  return name ? `${name} (${phoneNumber})` : phoneNumber;
-}
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
