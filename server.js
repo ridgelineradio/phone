@@ -27,6 +27,7 @@ const { MessagingResponse, VoiceResponse } = require("twilio").twiml;
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const { WebClient } = require("@slack/web-api");
+const { lookupName, saveName, displayCaller } = require("./directory");
 
 const ICECAST_URL = process.env.STREAM_URL;
 const ALERT_SMS_TO = process.env.ALERT_SMS_TO;
@@ -84,13 +85,13 @@ app.post("/voice", async (req, res) => {
   try {
     const result = await slack.chat.postMessage({
       channel: SLACK_CHANNEL_ID,
-      text: `Incoming call from ${from}`,
+      text: `Incoming call from ${displayCaller(from)}`,
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*Incoming Call*\n:phone: From: ${from}`,
+            text: `*Incoming Call*\n:phone: From: ${displayCaller(from)}`,
           },
         },
         {
@@ -106,6 +107,15 @@ app.post("/voice", async (req, res) => {
               style: "primary",
               action_id: "take_call",
               value: callSid,
+            },
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: lookupName(from) ? "Edit Name" : "Add Name",
+              },
+              action_id: "add_name",
+              value: from,
             },
           ],
         },
@@ -161,14 +171,17 @@ app.post("/sms", async (req, res) => {
     const continues =
       prior && now - prior.lastActivity <= TEXT_THREAD_WINDOW_MS;
 
-    const lines = [`*Incoming Text*`, `:speech_balloon: From: ${from}`];
+    const lines = [
+      `*Incoming Text*`,
+      `:speech_balloon: From: ${displayCaller(from)}`,
+    ];
     if (body) {
       lines.push(`\n>${body.replace(/\n/g, "\n>")}`);
     }
 
     const postOptions = {
       channel: SLACK_CHANNEL_ID,
-      text: `Incoming text from ${from}: ${body}`,
+      text: `Incoming text from ${displayCaller(from)}: ${body}`,
       blocks: [
         {
           type: "section",
@@ -183,6 +196,15 @@ app.post("/sms", async (req, res) => {
               text: { type: "plain_text", text: "Reply" },
               style: "primary",
               action_id: "reply_text",
+              value: from,
+            },
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: lookupName(from) ? "Edit Name" : "Add Name",
+              },
+              action_id: "add_name",
               value: from,
             },
           ],
@@ -224,8 +246,31 @@ app.post("/slack/interactive", async (req, res) => {
 
   const payload = JSON.parse(req.body.payload);
 
-  // Modal submission: send the SMS reply
+  // Modal submission
   if (payload.type === "view_submission") {
+    // Directory modal: save the caller's name
+    if (payload.view.callback_id === "add_name_modal") {
+      try {
+        const meta = JSON.parse(payload.view.private_metadata || "{}");
+        const name = (
+          payload.view.state.values.name_block.name_input.value || ""
+        ).trim();
+        if (!name) return;
+
+        saveName(meta.phone, name);
+
+        await slack.chat.postMessage({
+          channel: meta.channel,
+          thread_ts: meta.ts,
+          text: `:white_check_mark: Saved *${name}* for ${meta.phone}. Future calls and texts will show this name.`,
+        });
+      } catch (err) {
+        console.error("Error saving caller name:", err);
+      }
+      return;
+    }
+
+    // Reply modal: send the SMS reply
     try {
       const meta = JSON.parse(payload.view.private_metadata || "{}");
       const replyText = payload.view.state.values.reply_block.reply_input.value;
@@ -292,6 +337,46 @@ app.post("/slack/interactive", async (req, res) => {
     } catch (err) {
       console.error("Error opening reply modal:", err);
     }
+    return;
+  }
+
+  if (action.action_id === "add_name") {
+    try {
+      await slack.views.open({
+        trigger_id: payload.trigger_id,
+        view: {
+          type: "modal",
+          callback_id: "add_name_modal",
+          private_metadata: JSON.stringify({
+            phone: action.value,
+            channel: payload.channel?.id || payload.container?.channel_id,
+            ts: payload.message?.ts || payload.container?.message_ts,
+          }),
+          title: { type: "plain_text", text: "Directory" },
+          submit: { type: "plain_text", text: "Save" },
+          close: { type: "plain_text", text: "Cancel" },
+          blocks: [
+            {
+              type: "input",
+              block_id: "name_block",
+              label: {
+                type: "plain_text",
+                text: `Name for ${action.value}`,
+              },
+              element: {
+                type: "plain_text_input",
+                action_id: "name_input",
+                initial_value: lookupName(action.value) || "",
+                placeholder: { type: "plain_text", text: "e.g. Jane Doe" },
+              },
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      console.error("Error opening add name modal:", err);
+    }
+    return;
   }
 
   if (action.action_id === "take_call") {
