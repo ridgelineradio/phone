@@ -51,7 +51,7 @@ Once the slash command is configured, anyone in the workspace can text or call f
 
 Numbers can be 10 digits (US), 11 digits starting with 1, or full international format starting with `+`. For `text`, the number must not contain spaces; the rest of the line is the message.
 
-**How a call works:** the app looks up your phone number from your Slack profile (the same **Phone** field used for taking incoming calls) and rings it from the station number. When you pick up, you hear "Connecting you to…" and only then is the recipient dialed, with the station number as their caller ID. If you never answer, the recipient is not called and the channel message is updated to say so.
+**How a call works:** the app looks up your phone number from your Slack profile (the same **Phone** field used for taking incoming calls) and rings it from the station number. When you pick up, you hear "Connecting you to…" and only then is the recipient dialed, with the station number as their caller ID. If you never answer, the recipient is not called and the channel message is updated to say so. When the call ends, the channel message is updated with the outcome: the call length, or that the recipient did not answer.
 
 Every text and call is recorded in the Slack channel (`SLACK_CHANNEL_ID`) so the team can see what was sent: texts show up with the same **Reply** and **Add Name** buttons as inbound texts, and land in the existing conversation thread when that number texted recently.
 

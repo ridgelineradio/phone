@@ -651,8 +651,7 @@ app.post("/slack/commands", verifySlackSignature, async (req, res) => {
     // recipient with the station number as caller ID.
     try {
       const host = process.env.HOST || req.headers.host;
-      const connectParams = new URLSearchParams({ to });
-      const statusParams = new URLSearchParams({
+      const params = new URLSearchParams({
         to,
         user: userId,
         ts: slackTs || "",
@@ -660,8 +659,8 @@ app.post("/slack/commands", verifySlackSignature, async (req, res) => {
       await client.calls.create({
         to: userPhone,
         from: process.env.TWILIO_NUMBER,
-        url: `https://${host}/outbound-connect?${connectParams}`,
-        statusCallback: `https://${host}/outbound-status?${statusParams}`,
+        url: `https://${host}/outbound-connect?${params}`,
+        statusCallback: `https://${host}/outbound-status?${params}`,
       });
       console.log(`Calling ${req.body.user_name} to connect with ${to}`);
     } catch (err) {
@@ -733,9 +732,12 @@ app.post("/join-conference", async (req, res) => {
 });
 
 // TwiML for the outbound call once the Slack user has answered: dial the
-// recipient with the station number as caller ID.
+// recipient with the station number as caller ID. When the dial ends, Twilio
+// posts the outcome to /outbound-dial-status.
 app.post("/outbound-connect", (req, res) => {
   const to = normalizePhone(req.query.to);
+  const { user, ts } = req.query;
+  const host = process.env.HOST || req.headers.host;
   const twiml = new VoiceResponse();
 
   if (!to) {
@@ -747,11 +749,53 @@ app.post("/outbound-connect", (req, res) => {
         ? `Connecting you to ${name}.`
         : `Connecting you to the number ending in ${to.slice(-4)}.`,
     );
-    twiml.dial({ callerId: process.env.TWILIO_NUMBER }, to);
+    const params = new URLSearchParams({ to, user: user || "", ts: ts || "" });
+    twiml.dial(
+      {
+        callerId: process.env.TWILIO_NUMBER,
+        action: `https://${host}/outbound-dial-status?${params}`,
+      },
+      to,
+    );
   }
 
   res.type("text/xml");
   res.send(twiml.toString());
+});
+
+// <Dial> action callback: the recipient's leg has ended (or never answered).
+// Update the channel message with the final outcome and hang up the user.
+app.post("/outbound-dial-status", async (req, res) => {
+  const status = req.body.DialCallStatus;
+  const duration = parseInt(req.body.DialCallDuration || "0", 10) || 0;
+  const { to, user, ts } = req.query;
+
+  const twiml = new VoiceResponse();
+  let text;
+  if (status === "completed") {
+    const minutes = Math.floor(duration / 60);
+    const seconds = duration % 60;
+    text = `:telephone_receiver: <@${user}> called ${displayCaller(to)} (${minutes} min ${seconds} sec)`;
+  } else {
+    text = `:no_entry: <@${user}> called ${displayCaller(to)} but they did not answer (${status})`;
+    twiml.say("They did not answer. Goodbye.");
+  }
+  twiml.hangup();
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+
+  console.log(`Outbound dial to ${to} for user ${user} ended: ${status}`);
+
+  try {
+    if (ts) {
+      await slack.chat.update({ channel: SLACK_CHANNEL_ID, ts, text });
+    } else {
+      await slack.chat.postMessage({ channel: SLACK_CHANNEL_ID, text });
+    }
+  } catch (err) {
+    console.error("Failed to update Slack message:", err.message);
+  }
 });
 
 // Status callback for the Slack user's leg of an outbound call. If they never
