@@ -20,6 +20,7 @@ our simple use case.
 * **Voicemail Delivery**: Recorded voicemails are posted to Slack with a link to the recording and transcription
 * **Inbound Texts**: Incoming SMS/MMS are posted to Slack with a "Reply" button that opens a modal for replying to the sender directly from Slack
 * **Caller Directory**: Every incoming call and text includes an "Add Name" button. Click it to open a Slack modal, enter the caller's name, and save it. Once saved, future calls and texts from that number show the name (e.g. `Jane Doe (+15551234567)`) instead of just the raw number. The button reads "Edit Name" when a name is already on file.
+* **Outbound Calls and Texts**: A `/phone` slash command lets team members text or call any number from the station number without leaving Slack. Calls ring your own phone first, then dial the recipient with the station number as caller ID.
 
 ## Deployment
 
@@ -36,6 +37,25 @@ favorite container service!
 6. Copy the **Signing Secret** to `SLACK_SIGNING_SECRET`
 7. Get your channel ID by right-clicking the channel in Slack → View channel details
 8. Make sure team members have their phone numbers in their Slack profiles
+9. (Optional, for outbound calls and texts) Create a **Slash Command** named `/phone` with the Request URL `https://your-host.com/slack/commands`, which adds the `commands` scope. Reinstall the app if Slack asks you to.
+
+### `/phone` Slash Command
+
+Once the slash command is configured, anyone in the workspace can text or call from the station number:
+
+```
+/phone text <number> <message>   Send a text to <number> from the station number
+/phone call <number>             Call <number>, ringing your own phone first
+/phone help                      Show usage
+```
+
+Numbers can be 10 digits (US), 11 digits starting with 1, or full international format starting with `+`. For `text`, the number must not contain spaces; the rest of the line is the message.
+
+**How a call works:** the app looks up your phone number from your Slack profile (the same **Phone** field used for taking incoming calls) and rings it from the station number. When you pick up, you hear "Connecting you to…" and only then is the recipient dialed, with the station number as their caller ID. If you never answer, the recipient is not called and the channel message is updated to say so. When the call ends, the channel message is updated with the outcome: the call length, or that the recipient did not answer.
+
+Every text and call is recorded in the Slack channel (`SLACK_CHANNEL_ID`) so the team can see what was sent: texts show up with the same **Reply** and **Add Name** buttons as inbound texts, and land in the existing conversation thread when that number texted recently.
+
+Requests to `/slack/commands` are verified against the app's **Signing Secret**, so `SLACK_SIGNING_SECRET` must be set or the command is rejected. The `users:read` scope (already listed above) is needed to read your profile phone number.
 
 ### Twilio Setup
 
@@ -84,7 +104,7 @@ needed when using the mount above.
 * `TWILIO_AUTH_TOKEN` - Twilio auth token
 * `TWILIO_NUMBER` - your Twilio phone number that is receiving calls
 * `SLACK_BOT_TOKEN` - Slack bot token with permissions for chat:write, users:read, and channels:read
-* `SLACK_SIGNING_SECRET` - Slack app signing secret for verifying requests
+* `SLACK_SIGNING_SECRET` - Slack app signing secret for verifying requests; required for the `/phone` slash command
 * `SLACK_CHANNEL_ID` - Slack channel ID where call notifications will be posted
 * `TEXT_THREAD_WINDOW_MINUTES` - optional; look-back window in minutes for grouping consecutive texts from the same number into one Slack thread (default 15)
 * `HOST` - your application's public hostname (e.g., phone.example.com)
