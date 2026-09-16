@@ -19,6 +19,7 @@ OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 const express = require("express");
 const { createServer } = require("http");
+const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 const ffmpeg = require("fluent-ffmpeg");
 const { PassThrough } = require("stream");
@@ -36,7 +37,15 @@ const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+app.use(
+  bodyParser.urlencoded({
+    extended: false,
+    // Keep the raw body so Slack request signatures can be verified.
+    verify: (req, res, buf) => {
+      req.rawBody = buf.toString("utf8");
+    },
+  }),
+);
 app.use(express.json()); // For Slack JSON payloads
 
 const server = createServer(app);
@@ -59,6 +68,102 @@ const TEXT_THREAD_WINDOW_MS =
   60 *
   1000;
 const textThreads = new Map();
+
+// Normalize a free-text phone number to E.164. Accepts 10-digit US numbers,
+// 11 digits starting with 1, or a full international number starting with +.
+// Returns null when the input cannot be interpreted as a phone number.
+function normalizePhone(input) {
+  if (!input) return null;
+  const trimmed = String(input).trim();
+  const digits = trimmed.replace(/\D/g, "");
+  if (trimmed.startsWith("+")) {
+    return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : null;
+  }
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
+}
+
+// "••••1234" - enough to recognize your own number without exposing it.
+function maskPhone(phone) {
+  return `••••${phone.slice(-4)}`;
+}
+
+// Reply / Add Name buttons shared by inbound texts and outbound texts, so the
+// existing interactive handlers work on both.
+function textActionButtons(number) {
+  return {
+    type: "actions",
+    block_id: "text_actions",
+    elements: [
+      {
+        type: "button",
+        text: { type: "plain_text", text: "Reply" },
+        style: "primary",
+        action_id: "reply_text",
+        value: number,
+      },
+      {
+        type: "button",
+        text: {
+          type: "plain_text",
+          text: lookupName(number) ? "Edit Name" : "Add Name",
+        },
+        action_id: "add_name",
+        value: number,
+      },
+    ],
+  };
+}
+
+// Slack request signature verification (https://api.slack.com/authentication/verifying-requests-from-slack).
+// Applied to the slash command endpoint, which can spend money on calls and
+// texts, so an unsigned request is never accepted.
+function verifySlackSignature(req, res, next) {
+  if (!SLACK_SIGNING_SECRET) {
+    console.error("SLACK_SIGNING_SECRET is not set; rejecting Slack command");
+    return res.status(500).send("Slack signing secret is not configured");
+  }
+
+  const timestamp = req.headers["x-slack-request-timestamp"];
+  const signature = req.headers["x-slack-signature"] || "";
+
+  // Reject stale requests to limit replay attacks.
+  const ageSeconds = Math.abs(Date.now() / 1000 - Number(timestamp));
+  if (!timestamp || !Number.isFinite(ageSeconds) || ageSeconds > 60 * 5) {
+    return res.status(400).send("Invalid request timestamp");
+  }
+
+  const expected =
+    "v0=" +
+    crypto
+      .createHmac("sha256", SLACK_SIGNING_SECRET)
+      .update(`v0:${timestamp}:${req.rawBody || ""}`)
+      .digest("hex");
+  const expectedBuf = Buffer.from(expected);
+  const signatureBuf = Buffer.from(signature);
+  if (
+    expectedBuf.length !== signatureBuf.length ||
+    !crypto.timingSafeEqual(expectedBuf, signatureBuf)
+  ) {
+    return res.status(401).send("Invalid request signature");
+  }
+
+  next();
+}
+
+// Send an ephemeral follow-up to a slash command via its response_url.
+async function respondEphemeral(responseUrl, text) {
+  try {
+    await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response_type: "ephemeral", text }),
+    });
+  } catch (err) {
+    console.error("Failed to post to Slack response_url:", err.message);
+  }
+}
 
 app.get("/healthz", (_, res) => res.sendStatus(200));
 
@@ -187,28 +292,7 @@ app.post("/sms", async (req, res) => {
           type: "section",
           text: { type: "mrkdwn", text: lines.join("\n") },
         },
-        {
-          type: "actions",
-          block_id: "text_actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Reply" },
-              style: "primary",
-              action_id: "reply_text",
-              value: from,
-            },
-            {
-              type: "button",
-              text: {
-                type: "plain_text",
-                text: lookupName(from) ? "Edit Name" : "Add Name",
-              },
-              action_id: "add_name",
-              value: from,
-            },
-          ],
-        },
+        textActionButtons(from),
       ],
     };
     if (continues) {
@@ -440,6 +524,170 @@ app.post("/slack/interactive", async (req, res) => {
   }
 });
 
+const PHONE_USAGE = [
+  "*Usage*",
+  "`/phone text <number> <message>` - send a text from the station number",
+  "`/phone call <number>` - ring your phone first, then dial the number with the station's caller ID",
+  "Numbers can be 10 digits (US) or international format starting with +.",
+].join("\n");
+
+// Slack slash command: /phone text <number> <message> | /phone call <number>
+app.post("/slack/commands", verifySlackSignature, async (req, res) => {
+  const userId = req.body.user_id;
+  const responseUrl = req.body.response_url;
+  const args = (req.body.text || "").trim();
+  const match = args.match(/^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/);
+  const subcommand = match ? match[1].toLowerCase() : "";
+
+  const ephemeral = (text) => res.json({ response_type: "ephemeral", text });
+
+  if (subcommand === "text") {
+    const to = normalizePhone(match[2]);
+    const message = (match[3] || "").trim();
+    if (!to) {
+      return ephemeral(
+        `:warning: Missing or invalid phone number.\n${PHONE_USAGE}`,
+      );
+    }
+    if (!message) {
+      return ephemeral(`:warning: The message is empty.\n${PHONE_USAGE}`);
+    }
+
+    // Slack needs a response within 3 seconds, so ack now and work after.
+    ephemeral(`Sending text to ${displayCaller(to)}…`);
+
+    try {
+      await client.messages.create({
+        to,
+        from: process.env.TWILIO_NUMBER,
+        body: message,
+      });
+      console.log(`Text sent to ${to} by ${req.body.user_name}`);
+    } catch (err) {
+      console.error("Error sending text from slash command:", err.message);
+      await respondEphemeral(
+        responseUrl,
+        `:x: Failed to send text to ${displayCaller(to)}: ${err.message}`,
+      );
+      return;
+    }
+
+    // Record it in the channel, in the existing conversation thread if the
+    // number texted us recently, so replies land in the same place.
+    try {
+      const now = Date.now();
+      const prior = textThreads.get(to);
+      const continues =
+        prior && now - prior.lastActivity <= TEXT_THREAD_WINDOW_MS;
+      const text = `:outbox_tray: Text sent to ${displayCaller(to)} by <@${userId}>:\n>${message.replace(/\n/g, "\n>")}`;
+
+      const postOptions = {
+        channel: SLACK_CHANNEL_ID,
+        text,
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text } },
+          textActionButtons(to),
+        ],
+      };
+      if (continues) {
+        postOptions.thread_ts = prior.ts;
+      }
+
+      const result = await slack.chat.postMessage(postOptions);
+      const rootTs = continues ? prior.ts : result.ts;
+      textThreads.set(to, { ts: rootTs, lastActivity: now });
+    } catch (err) {
+      console.error("Error posting outbound text to Slack:", err);
+    }
+
+    await respondEphemeral(
+      responseUrl,
+      `:white_check_mark: Text sent to ${displayCaller(to)}.`,
+    );
+    return;
+  }
+
+  if (subcommand === "call") {
+    // Everything after "call" is the number, so "(555) 123-4567" works too.
+    const to = normalizePhone(args.slice(match[1].length));
+    if (!to) {
+      return ephemeral(
+        `:warning: Missing or invalid phone number.\n${PHONE_USAGE}`,
+      );
+    }
+
+    // Look up the user's own phone from their Slack profile.
+    let userPhone;
+    try {
+      const userInfo = await slack.users.info({ user: userId });
+      userPhone = normalizePhone(userInfo.user.profile.phone);
+    } catch (err) {
+      console.error("Failed to look up Slack user profile:", err.message);
+      return ephemeral(`:x: Could not read your Slack profile: ${err.message}`);
+    }
+    if (!userPhone) {
+      return ephemeral(
+        ":warning: No phone number on your Slack profile. Add one under Profile → Phone and try again.",
+      );
+    }
+
+    ephemeral(
+      `Calling your phone at ${maskPhone(userPhone)}, then dialing ${displayCaller(to)}…`,
+    );
+
+    // Channel record first so the status callback can update it.
+    let slackTs;
+    try {
+      const result = await slack.chat.postMessage({
+        channel: SLACK_CHANNEL_ID,
+        text: `:telephone_receiver: <@${userId}> is calling ${displayCaller(to)}`,
+      });
+      slackTs = result.ts;
+    } catch (err) {
+      console.error("Failed to post outbound call to Slack:", err.message);
+    }
+
+    // Ring the user first. When they answer, /outbound-connect dials the
+    // recipient with the station number as caller ID.
+    try {
+      const host = process.env.HOST || req.headers.host;
+      const connectParams = new URLSearchParams({ to });
+      const statusParams = new URLSearchParams({
+        to,
+        user: userId,
+        ts: slackTs || "",
+      });
+      await client.calls.create({
+        to: userPhone,
+        from: process.env.TWILIO_NUMBER,
+        url: `https://${host}/outbound-connect?${connectParams}`,
+        statusCallback: `https://${host}/outbound-status?${statusParams}`,
+      });
+      console.log(`Calling ${req.body.user_name} to connect with ${to}`);
+    } catch (err) {
+      console.error("Failed to place outbound call:", err.message);
+      await respondEphemeral(
+        responseUrl,
+        `:x: Failed to call your phone: ${err.message}`,
+      );
+      if (slackTs) {
+        try {
+          await slack.chat.update({
+            channel: SLACK_CHANNEL_ID,
+            ts: slackTs,
+            text: `:x: <@${userId}>'s call to ${displayCaller(to)} failed: ${err.message}`,
+          });
+        } catch (updateErr) {
+          console.error("Failed to update Slack message:", updateErr.message);
+        }
+      }
+    }
+    return;
+  }
+
+  return ephemeral(PHONE_USAGE);
+});
+
 // Conference join endpoint for the volunteer (triggers caller redirect)
 app.post("/join-conference", async (req, res) => {
   const room = req.query.room;
@@ -481,6 +729,51 @@ app.post("/join-conference", async (req, res) => {
     } catch (err) {
       console.error("Failed to redirect caller to conference:", err.message);
     }
+  }
+});
+
+// TwiML for the outbound call once the Slack user has answered: dial the
+// recipient with the station number as caller ID.
+app.post("/outbound-connect", (req, res) => {
+  const to = normalizePhone(req.query.to);
+  const twiml = new VoiceResponse();
+
+  if (!to) {
+    twiml.say("Sorry, that phone number is not valid. Goodbye.");
+  } else {
+    const name = lookupName(to);
+    twiml.say(
+      name
+        ? `Connecting you to ${name}.`
+        : `Connecting you to the number ending in ${to.slice(-4)}.`,
+    );
+    twiml.dial({ callerId: process.env.TWILIO_NUMBER }, to);
+  }
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// Status callback for the Slack user's leg of an outbound call. If they never
+// picked up, note it in the channel so the call does not look like it happened.
+app.post("/outbound-status", async (req, res) => {
+  res.status(200).send();
+
+  const status = req.body.CallStatus;
+  const { to, user, ts } = req.query;
+  if (!["no-answer", "busy", "failed", "canceled"].includes(status)) return;
+
+  console.log(`Outbound call to ${to} for user ${user} ended: ${status}`);
+
+  const text = `:no_entry: <@${user}> tried to call ${displayCaller(to)} but their phone did not pick up (${status})`;
+  try {
+    if (ts) {
+      await slack.chat.update({ channel: SLACK_CHANNEL_ID, ts, text });
+    } else {
+      await slack.chat.postMessage({ channel: SLACK_CHANNEL_ID, text });
+    }
+  } catch (err) {
+    console.error("Failed to update Slack message:", err.message);
   }
 });
 
