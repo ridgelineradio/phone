@@ -89,6 +89,35 @@ function maskPhone(phone) {
   return `••••${phone.slice(-4)}`;
 }
 
+// The Add/Edit Name button, shared by every message about a phone number so
+// the label logic lives in one place.
+function nameButton(number) {
+  return {
+    type: "button",
+    text: {
+      type: "plain_text",
+      text: lookupName(number) ? "Edit Name" : "Add Name",
+    },
+    action_id: "add_name",
+    value: number,
+  };
+}
+
+// The name button on its own, for messages with no other actions. A call
+// outcome replaces its blocks wholesale, so it rebuilds this to keep the
+// directory reachable once the call is over. Returns nothing for a caller we
+// have no usable number for, which could not be a directory key anyway.
+function nameActionBlocks(number, blockId) {
+  if (!normalizePhone(number)) return [];
+  return [
+    {
+      type: "actions",
+      block_id: blockId,
+      elements: [nameButton(number)],
+    },
+  ];
+}
+
 // Reply / Add Name buttons shared by inbound texts and outbound texts, so the
 // existing interactive handlers work on both.
 function textActionButtons(number) {
@@ -103,15 +132,7 @@ function textActionButtons(number) {
         action_id: "reply_text",
         value: number,
       },
-      {
-        type: "button",
-        text: {
-          type: "plain_text",
-          text: lookupName(number) ? "Edit Name" : "Add Name",
-        },
-        action_id: "add_name",
-        value: number,
-      },
+      nameButton(number),
     ],
   };
 }
@@ -213,15 +234,7 @@ app.post("/voice", async (req, res) => {
               action_id: "take_call",
               value: callSid,
             },
-            {
-              type: "button",
-              text: {
-                type: "plain_text",
-                text: lookupName(from) ? "Edit Name" : "Add Name",
-              },
-              action_id: "add_name",
-              value: from,
-            },
+            nameButton(from),
           ],
         },
       ],
@@ -483,15 +496,16 @@ app.post("/slack/interactive", async (req, res) => {
       await slack.chat.update({
         channel: SLACK_CHANNEL_ID,
         ts: callState.slackTs,
-        text: `Call from ${callState.from} - ${userName} is taking it`,
+        text: `Call from ${displayCaller(callState.from)} - ${userName} is taking it`,
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `*Call from ${callState.from}*\n:white_check_mark: <@${userId}> is taking the call`,
+              text: `*Call from ${displayCaller(callState.from)}*\n:white_check_mark: <@${userId}> is taking the call`,
             },
           },
+          ...nameActionBlocks(callState.from, "call_actions"),
         ],
       });
     } catch (err) {
@@ -858,15 +872,16 @@ app.post("/voicemail-recording", async (req, res) => {
   try {
     const result = await slack.chat.postMessage({
       channel: SLACK_CHANNEL_ID,
-      text: `Voicemail from ${from}`,
+      text: `Voicemail from ${displayCaller(from)}`,
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*Voicemail Received*\n:incoming_envelope: From: ${from}\n<https://${host}/recording/${recordingSid}|Listen to recording>`,
+            text: `*Voicemail Received*\n:incoming_envelope: From: ${displayCaller(from)}\n<https://${host}/recording/${recordingSid}|Listen to recording>`,
           },
         },
+        ...nameActionBlocks(from, "voicemail_actions"),
       ],
     });
 
@@ -957,15 +972,16 @@ async function redirectToVoicemail(callSid, from) {
     await slack.chat.update({
       channel: SLACK_CHANNEL_ID,
       ts: callState.slackTs,
-      text: `Call from ${from} - sent to voicemail (no response)`,
+      text: `Call from ${displayCaller(from)} - sent to voicemail (no response)`,
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*Call from ${from}*\n:clock3: No response - redirected to voicemail`,
+            text: `*Call from ${displayCaller(from)}*\n:clock3: No response - redirected to voicemail`,
           },
         },
+        ...nameActionBlocks(from, "call_actions"),
       ],
     });
   } catch (err) {
