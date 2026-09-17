@@ -19,7 +19,7 @@ our simple use case.
 * **Voicemail System**: If no one responds within 3 minutes, the call is automatically redirected to voicemail
 * **Voicemail Delivery**: Recorded voicemails are posted to Slack with a link to the recording and transcription
 * **Inbound Texts**: Incoming SMS/MMS are posted to Slack with a "Reply" button that opens a modal for replying to the sender directly from Slack
-* **Caller Directory**: Every incoming call and text includes an "Add Name" button. Click it to open a Slack modal, enter the caller's name, and save it. Once saved, future calls and texts from that number show the name (e.g. `Jane Doe (+15551234567)`) instead of just the raw number. The button reads "Edit Name" when a name is already on file.
+* **Caller Directory**: Every incoming call and text includes an "Add Name" button. Click it to open a Slack modal, enter the caller's name, and save it. Once saved, future calls and texts from that number show the name (e.g. `Jane Doe (+15551234567)`) instead of just the raw number. The button reads "Edit Name" when a name is already on file, and stays on the message after the call ends — whether it was answered, went to voicemail, or the caller hung up on hold — so a number can still be named after the fact. The "Voicemail Received" message carries it too.
 * **Outbound Calls and Texts**: A `/phone` slash command lets team members text or call any number from the station number without leaving Slack. Calls ring your own phone first, then dial the recipient with the station number as caller ID.
 
 ## Deployment
